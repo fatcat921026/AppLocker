@@ -20,6 +20,8 @@
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
     <uses-permission android:name="com.fingerprints.service.ACCESS_FINGERPRINT_MANAGER" />
     <uses-permission android:name="com.samsung.android.providers.context.permission.WRITE_USE_APP_FEATURE_SURVEY" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <application
         android:name=".AppLockerApplication"
@@ -55,7 +57,16 @@
 
         <activity
             android:name=".ui.overlay.activity.OverlayValidationActivity"
-            android:excludeFromRecents="true" />
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:clearTaskOnLaunch="true"
+            android:finishOnTaskLaunch="true"
+            android:theme="@style/Theme.Transparent"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait" />
 
         <activity
             android:name=".ui.background.BackgroundsActivity"
@@ -77,7 +88,13 @@
             android:name=".ui.intruders.IntrudersPhotosActivity"
             android:theme="@style/AppTheme.NoActionBar" />
 
-        <service android:name=".service.AppLockerService" />
+        <service 
+            android:name=".service.AppLockerService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                    android:value="app_locker_security_service" />
+        </service>
 
         <receiver android:name=".service.receiver.BootCompleteReceiver">
             <intent-filter>
