@@ -29,40 +29,65 @@ class AppForegroundObservable @Inject constructor(val context: Context) {
 
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
     private fun getForegroundObservableHigherLollipop(): Flowable<String> {
-        return Flowable.interval(100, TimeUnit.MILLISECONDS)
+        return Flowable.interval(500, TimeUnit.MILLISECONDS) // 增加間隔時間，減少頻繁觸發
             .filter { PermissionChecker.checkUsageAccessPermission(context) }
             .map {
-                var usageEvent: UsageEvents.Event? = null
+                var latestUsageEvent: UsageEvents.Event? = null
 
                 val mUsageStatsManager = context.getSystemService(Service.USAGE_STATS_SERVICE) as UsageStatsManager
                 val time = System.currentTimeMillis()
 
-                val usageEvents = mUsageStatsManager.queryEvents(time - 1000 * 3600, time)
+                // 只查詢最近10秒的事件，減少查詢範圍
+                val usageEvents = mUsageStatsManager.queryEvents(time - 10000, time)
                 val event = UsageEvents.Event()
+                
                 while (usageEvents.hasNextEvent()) {
                     usageEvents.getNextEvent(event)
+                    // 只關注 MOVE_TO_FOREGROUND 事件
                     if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                        usageEvent = event
+                        // 記錄最新的前台事件
+                        if (latestUsageEvent == null || event.timeStamp > latestUsageEvent.timeStamp) {
+                            latestUsageEvent = UsageEvents.Event().apply {
+                                packageName = event.packageName
+                                className = event.className
+                                eventType = event.eventType
+                                timeStamp = event.timeStamp
+                            }
+                        }
                     }
                 }
-                UsageEventWrapper(usageEvent)
+                
+                UsageEventWrapper(latestUsageEvent)
             }
             .filter { it.usageEvent != null }
             .map { it.usageEvent }
             .filter { it.className != null }
-            .filter { it.className.contains(OverlayValidationActivity::class.java.simpleName).not() }
+            .filter { 
+                // 過濾掉我們自己的 OverlayValidationActivity
+                it.className.contains(OverlayValidationActivity::class.java.simpleName).not() 
+            }
             .map { it.packageName }
-            .distinctUntilChanged()
+            .distinctUntilChanged() // 只有當包名真正改變時才發出
+            .debounce(200, TimeUnit.MILLISECONDS) // 防抖處理，200ms內的重複事件會被過濾
     }
 
     private fun getForegroundObservableLowerLollipop(): Flowable<String> {
-        return Flowable.interval(100, TimeUnit.MILLISECONDS)
+        return Flowable.interval(500, TimeUnit.MILLISECONDS) // 增加間隔時間
             .map {
                 val mActivityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                mActivityManager.getRunningTasks(1)[0].topActivity
+                val runningTasks = mActivityManager.getRunningTasks(1)
+                if (runningTasks.isNotEmpty()) {
+                    runningTasks[0].topActivity
+                } else {
+                    null
+                }
             }
-            .filter { it.className.contains(OverlayValidationActivity::class.java.simpleName).not() }
-            .map { it.packageName }
+            .filter { it != null }
+            .filter { 
+                it!!.className.contains(OverlayValidationActivity::class.java.simpleName).not() 
+            }
+            .map { it!!.packageName }
             .distinctUntilChanged()
+            .debounce(200, TimeUnit.MILLISECONDS) // 防抖處理
     }
 }

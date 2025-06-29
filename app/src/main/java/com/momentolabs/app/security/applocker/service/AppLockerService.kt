@@ -29,7 +29,6 @@ import io.reactivex.Flowable
 import io.reactivex.subjects.PublishSubject
 import android.content.IntentFilter
 import android.util.Log
-import com.bugsnag.android.Bugsnag
 import com.momentolabs.app.security.applocker.data.SystemPackages
 import com.momentolabs.app.security.applocker.ui.permissions.PermissionChecker
 import io.reactivex.disposables.Disposable
@@ -72,12 +71,30 @@ class AppLockerService : DaggerService() {
     private var isOverlayShowing = false
 
     private var lastForegroundAppPackage: String? = null
+    
+    // 新增：防止重複觸發的狀態控制
+    private var isProcessingAppChange = false
+    private var lastProcessedApp: String? = null
+    private var lastProcessTime = 0L
+    private val MIN_PROCESS_INTERVAL = 1000L // 1秒內不重複處理同一應用
+
+    // 新增：應用鎖定狀態追蹤
+    private var currentLockedApp: String? = null
+    private var isAppCurrentlyLocked = false
 
     private var screenOnOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_ON -> observeForegroundApplication()
-                Intent.ACTION_SCREEN_OFF -> stopForegroundApplicationObserver()
+                Intent.ACTION_SCREEN_ON -> {
+                    // 螢幕開啟時重置狀態
+                    resetLockState()
+                    observeForegroundApplication()
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    // 螢幕關閉時重置狀態並停止監控
+                    resetLockState()
+                    stopForegroundApplicationObserver()
+                }
             }
         }
     }
@@ -103,19 +120,12 @@ class AppLockerService : DaggerService() {
         super.onCreate()
 
         initializeAppLockerNotification()
-
         initializeOverlayView()
-
         registerScreenReceiver()
-
         registerInstallUninstallReceiver()
-
         observeLockedApps()
-
         observeOverlayView()
-
         observeForegroundApplication()
-
         observePermissionChecker()
     }
 
@@ -164,7 +174,9 @@ class AppLockerService : DaggerService() {
                     lockedAppList.forEach { lockedAppPackageSet.add(it.parsePackageName()) }
                     SystemPackages.getSystemPackages().forEach { lockedAppPackageSet.add(it) }
                 },
-                { error -> Bugsnag.notify(error) })
+                { error -> 
+                    Log.e("AppLockerService", "Error observing locked apps", error)
+                })
     }
 
     private fun observeOverlayView() {
@@ -198,7 +210,9 @@ class AppLockerService : DaggerService() {
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe(
                 { foregroundAppPackage -> onAppForeground(foregroundAppPackage) },
-                { error -> Bugsnag.notify(error) })
+                { error -> 
+                    Log.e("AppLockerService", "Error observing foreground app", error)
+                })
         allDisposables.add(foregroundAppDisposable!!)
     }
 
@@ -223,26 +237,76 @@ class AppLockerService : DaggerService() {
     }
 
     private fun onAppForeground(foregroundAppPackage: String) {
-        hideOverlay()
-        if (lockedAppPackageSet.contains(foregroundAppPackage)) {
-            if (appLockerPreferences.getFingerPrintEnabled() || PermissionChecker.checkOverlayPermission(
-                    applicationContext
-                ).not()
-            ) {
-                val intent =
-                    OverlayValidationActivity.newIntent(applicationContext, foregroundAppPackage)
-                if (lastForegroundAppPackage == applicationContext.packageName) {
-                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                } else {
-                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        // 防止重複處理和過於頻繁的觸發
+        val currentTime = System.currentTimeMillis()
+        if (isProcessingAppChange || 
+            (lastProcessedApp == foregroundAppPackage && 
+             currentTime - lastProcessTime < MIN_PROCESS_INTERVAL)) {
+            return
+        }
+
+        isProcessingAppChange = true
+        lastProcessedApp = foregroundAppPackage
+        lastProcessTime = currentTime
+
+        try {
+            Log.d("AppLockerService", "App foreground: $foregroundAppPackage, last: $lastForegroundAppPackage")
+
+            // 如果當前應用是我們自己的應用，不需要處理
+            if (foregroundAppPackage == applicationContext.packageName) {
+                lastForegroundAppPackage = foregroundAppPackage
+                return
+            }
+
+            // 如果從鎖定狀態切換到其他應用，先隱藏覆蓋層
+            if (isAppCurrentlyLocked && currentLockedApp != foregroundAppPackage) {
+                hideOverlay()
+                resetLockState()
+            }
+
+            // 檢查新的前台應用是否需要鎖定
+            if (lockedAppPackageSet.contains(foregroundAppPackage)) {
+                // 如果已經在鎖定同一個應用，不重複觸發
+                if (isAppCurrentlyLocked && currentLockedApp == foregroundAppPackage) {
+                    return
                 }
 
-                startActivity(intent)
+                showAppLock(foregroundAppPackage)
             } else {
-                showOverlay(foregroundAppPackage)
+                // 當前應用不需要鎖定，重置狀態
+                if (isAppCurrentlyLocked) {
+                    hideOverlay()
+                    resetLockState()
+                }
             }
+
+            lastForegroundAppPackage = foregroundAppPackage
+        } finally {
+            isProcessingAppChange = false
         }
-        lastForegroundAppPackage = foregroundAppPackage
+    }
+
+    private fun showAppLock(foregroundAppPackage: String) {
+        currentLockedApp = foregroundAppPackage
+        isAppCurrentlyLocked = true
+
+        if (appLockerPreferences.getFingerPrintEnabled() || 
+            PermissionChecker.checkOverlayPermission(applicationContext).not()) {
+            
+            val intent = OverlayValidationActivity.newIntent(applicationContext, foregroundAppPackage)
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            startActivity(intent)
+        } else {
+            showOverlay(foregroundAppPackage)
+        }
+    }
+
+    private fun resetLockState() {
+        isAppCurrentlyLocked = false
+        currentLockedApp = null
+        if (isOverlayShowing) {
+            hideOverlay()
+        }
     }
 
     private fun onDrawPattern(pattern: List<PatternLockView.Dot>) {
@@ -253,6 +317,7 @@ class AppLockerService : DaggerService() {
         if (isDrawedPatternCorrect) {
             overlayView.notifyDrawnCorrect()
             hideOverlay()
+            resetLockState()
         } else {
             overlayView.notifyDrawnWrong()
         }
@@ -283,7 +348,11 @@ class AppLockerService : DaggerService() {
     private fun hideOverlay() {
         if (isOverlayShowing) {
             isOverlayShowing = false
-            windowManager.removeViewImmediate(overlayView)
+            try {
+                windowManager.removeViewImmediate(overlayView)
+            } catch (e: Exception) {
+                Log.e("AppLockerService", "Error removing overlay", e)
+            }
         }
     }
 
