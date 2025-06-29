@@ -1,21 +1,22 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
-
 buildscript {
     ext.kotlin_version = '1.3.50'
     repositories {
         google()
         jcenter()
         mavenCentral()
-        maven {
-            url 'https://maven.fabric.io/public'
-        }
+        // 移除 Fabric Maven 倉庫
+        // maven {
+        //     url 'https://maven.fabric.io/public'
+        // }
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:3.5.0'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
-        classpath 'com.google.gms:google-services:4.3.2'
-        classpath "io.fabric.tools:gradle:1.30.0"
-        classpath 'com.bugsnag:bugsnag-android-gradle-plugin:4.2.0'
+        
+        // 移除廣告和錯誤回報相關依賴
+        // classpath 'com.google.gms:google-services:4.3.2'
+        // classpath "io.fabric.tools:gradle:1.30.0"
+        // classpath 'com.bugsnag:bugsnag-android-gradle-plugin:4.2.0'
     }
 }
 
@@ -24,9 +25,10 @@ allprojects {
         google()
         jcenter()
         mavenCentral()
-        maven {
-            url 'https://maven.fabric.io/public'
-        }
+        // 移除 Fabric Maven 倉庫
+        // maven {
+        //     url 'https://maven.fabric.io/public'
+        // }
         maven { url 'https://jitpack.io' }
     }
 }
@@ -40,9 +42,9 @@ ext {
             package          : "com.momentolabs.app.security.applocker",
             compileSdkVersion: 29,
             targetSdkVersion : 29,
-            minSdkVersion    : 17,
+            minSdkVersion    : 21,
             devMinSdkVersion : 23,
-            versionCode      : 37,
-            versionName      : "1.5.5"
+            versionCode      : 1,
+            versionName      : "1.0"
     ]
 }
