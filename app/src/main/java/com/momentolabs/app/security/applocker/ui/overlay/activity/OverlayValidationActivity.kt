@@ -1,4 +1,4 @@
-// 2. 修改或創建 OverlayValidationActivity.kt
+// === 第三步：完全重寫 OverlayValidationActivity.kt ===
 package com.momentolabs.app.security.applocker.ui.overlay.activity
 
 import android.content.Context
@@ -13,162 +13,293 @@ class OverlayValidationActivity : AppCompatActivity() {
         private const val TAG = "OverlayValidation"
         private const val EXTRA_PACKAGE_NAME = "EXTRA_PACKAGE_NAME"
         
-        // 防重複觸發的靜態變數
-        private var isActivityActive = false
-        private var lastPackageName: String? = null
-        private var lastShowTime = 0L
-        private val MIN_SHOW_INTERVAL = 2000L // 2秒內不重複顯示
-        private val activeSessions = mutableSetOf<String>()
-
+        // 全局session管理
+        private val activeSessions = mutableMapOf<String, SessionInfo>()
+        private var globalActivityCount = 0
+        
+        private data class SessionInfo(
+            val packageName: String,
+            val createdTime: Long,
+            val activityInstance: String
+        )
+        
+        private const val SESSION_TIMEOUT = 5000L // 5秒session超時
+        private const val MAX_SESSIONS = 1 // 最多只允許1個session
+        
+        @Synchronized
         fun newIntent(context: Context, lockedAppPackageName: String): Intent {
             val currentTime = System.currentTimeMillis()
-            val sessionKey = "$lockedAppPackageName-${currentTime / MIN_SHOW_INTERVAL}" // 基於時間片的session key
+            val instanceId = "${lockedAppPackageName}_${currentTime}_${System.identityHashCode(context)}"
             
-            Log.d(TAG, "Creating intent for: $lockedAppPackageName")
-            Log.d(TAG, "Current state - active: $isActivityActive, last: $lastPackageName, sessions: ${activeSessions.size}")
+            Log.e(TAG, "=== newIntent called ===")
+            Log.e(TAG, "Package: $lockedAppPackageName")
+            Log.e(TAG, "Current sessions: ${activeSessions.size}")
+            Log.e(TAG, "Global activity count: $globalActivityCount")
             
-            // 檢查是否已有相同應用的活躍session
-            if (activeSessions.any { it.startsWith("$lockedAppPackageName-") }) {
-                Log.d(TAG, "Active session exists for $lockedAppPackageName, skipping")
-                return Intent() // 返回空Intent
+            // 清理過期session
+            cleanupExpiredSessions()
+            
+            // 檢查是否已有相同包名的活躍session
+            val existingSession = activeSessions[lockedAppPackageName]
+            if (existingSession != null) {
+                val sessionAge = currentTime - existingSession.createdTime
+                if (sessionAge < SESSION_TIMEOUT) {
+                    Log.e(TAG, "Active session exists for $lockedAppPackageName (age: ${sessionAge}ms), returning empty intent")
+                    return Intent() // 返回空Intent
+                } else {
+                    Log.e(TAG, "Session expired for $lockedAppPackageName, removing")
+                    activeSessions.remove(lockedAppPackageName)
+                }
             }
             
-            // 檢查是否在短時間內重複觸發
-            if (isActivityActive && 
-                lastPackageName == lockedAppPackageName && 
-                currentTime - lastShowTime < MIN_SHOW_INTERVAL) {
-                Log.d(TAG, "Too frequent trigger for $lockedAppPackageName, skipping")
+            // 檢查總session數量
+            if (activeSessions.size >= MAX_SESSIONS) {
+                Log.e(TAG, "Too many sessions (${activeSessions.size}), clearing all")
+                activeSessions.clear()
+            }
+            
+            // 檢查全局activity數量
+            if (globalActivityCount > 0) {
+                Log.e(TAG, "Activity already running (count: $globalActivityCount), returning empty intent")
                 return Intent()
             }
             
-            // 清理過期的sessions
-            val currentTimeSlot = currentTime / MIN_SHOW_INTERVAL
-            activeSessions.removeAll { session ->
-                val sessionTime = session.substringAfter("-").toLongOrNull() ?: 0
-                currentTimeSlot - sessionTime > 3 // 保留最近3個時間片
-            }
+            // 創建新session
+            activeSessions[lockedAppPackageName] = SessionInfo(
+                packageName = lockedAppPackageName,
+                createdTime = currentTime,
+                activityInstance = instanceId
+            )
             
-            // 添加新session
-            activeSessions.add(sessionKey)
-            lastPackageName = lockedAppPackageName
-            lastShowTime = currentTime
+            Log.e(TAG, "Creating new session: $instanceId")
+            Log.e(TAG, "Total active sessions: ${activeSessions.size}")
             
-            Log.d(TAG, "Creating valid intent for: $lockedAppPackageName")
             return Intent(context, OverlayValidationActivity::class.java).apply {
                 putExtra(EXTRA_PACKAGE_NAME, lockedAppPackageName)
-                putExtra("SESSION_KEY", sessionKey)
+                putExtra("INSTANCE_ID", instanceId)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
+                        Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                        Intent.FLAG_ACTIVITY_NO_HISTORY
             }
         }
         
+        @Synchronized
         fun clearSession(packageName: String) {
-            activeSessions.removeAll { it.startsWith("$packageName-") }
-            if (lastPackageName == packageName) {
-                lastPackageName = null
+            Log.e(TAG, "Clearing session for: $packageName")
+            activeSessions.remove(packageName)
+        }
+        
+        @Synchronized
+        fun clearAllSessions() {
+            Log.e(TAG, "Clearing all sessions (${activeSessions.size})")
+            activeSessions.clear()
+            globalActivityCount = 0
+        }
+        
+        private fun cleanupExpiredSessions() {
+            val currentTime = System.currentTimeMillis()
+            val expiredSessions = activeSessions.filter { (_, session) ->
+                currentTime - session.createdTime > SESSION_TIMEOUT
             }
-            Log.d(TAG, "Cleared session for: $packageName")
+            
+            expiredSessions.forEach { (packageName, _) ->
+                Log.e(TAG, "Removing expired session: $packageName")
+                activeSessions.remove(packageName)
+            }
+        }
+        
+        @Synchronized
+        private fun incrementActivityCount() {
+            globalActivityCount++
+            Log.e(TAG, "Activity count incremented to: $globalActivityCount")
+        }
+        
+        @Synchronized
+        private fun decrementActivityCount() {
+            globalActivityCount = maxOf(0, globalActivityCount - 1)
+            Log.e(TAG, "Activity count decremented to: $globalActivityCount")
         }
     }
 
     private var lockedAppPackageName: String? = null
-    private var sessionKey: String? = null
+    private var instanceId: String? = null
     private var hasValidatedSuccessfully = false
-
+    private var isActivityValid = false
+    private var startTime = 0L
+    
+    // 自動消失的Handler
+    private val autoFinishHandler = android.os.Handler()
+    private val autoFinishRunnable = Runnable {
+        Log.e(TAG, "Auto finishing activity due to timeout")
+        finishWithCleanup()
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        startTime = System.currentTimeMillis()
         
-        Log.d(TAG, "OverlayValidationActivity onCreate")
+        Log.e(TAG, "=== OverlayValidationActivity onCreate ===")
+        incrementActivityCount()
         
-        // 檢查Intent是否有效
+        // 獲取Intent數據
         lockedAppPackageName = intent?.getStringExtra(EXTRA_PACKAGE_NAME)
-        sessionKey = intent?.getStringExtra("SESSION_KEY")
+        instanceId = intent?.getStringExtra("INSTANCE_ID")
         
-        if (lockedAppPackageName.isNullOrEmpty() || sessionKey.isNullOrEmpty()) {
-            Log.d(TAG, "Invalid intent, finishing activity")
-            finish()
+        Log.e(TAG, "Package: $lockedAppPackageName")
+        Log.e(TAG, "Instance ID: $instanceId")
+        
+        // 驗證Intent有效性
+        if (lockedAppPackageName.isNullOrEmpty() || instanceId.isNullOrEmpty()) {
+            Log.e(TAG, "Invalid intent data, finishing immediately")
+            finishWithCleanup()
             return
         }
         
-        // 檢查session是否仍然有效
-        if (!activeSessions.contains(sessionKey)) {
-            Log.d(TAG, "Session expired: $sessionKey, finishing activity")
-            finish()
+        // 驗證session有效性
+        val session = activeSessions[lockedAppPackageName]
+        if (session == null || session.activityInstance != instanceId) {
+            Log.e(TAG, "Invalid or expired session, finishing immediately")
+            finishWithCleanup()
             return
         }
         
-        isActivityActive = true
-        Log.d(TAG, "Starting validation for: $lockedAppPackageName")
+        isActivityValid = true
         
-        // 設置Activity屬性防止被系統回收
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
+        // 設置Activity屬性
+        try {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting activity flags: ${e.message}")
+        }
         
-        // 在這裡初始化你的UI和驗證邏輯
+        // 設置自動消失定時器（15秒）
+        autoFinishHandler.postDelayed(autoFinishRunnable, 15000)
+        
+        Log.e(TAG, "Activity created successfully")
+        
+        // 在這裡初始化你的UI
         // setContentView(R.layout.activity_overlay_validation)
         // initializeViews()
-        // startValidation()
+        
+        // 模擬驗證流程
+        simulateValidation()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        Log.e(TAG, "onStart()")
     }
 
     override fun onResume() {
         super.onResume()
-        Log.d(TAG, "OverlayValidationActivity onResume")
+        Log.e(TAG, "onResume()")
         
-        // 確保Activity在最前面
-        if (!hasValidatedSuccessfully) {
-            // 重新檢查是否需要顯示鎖屏
-            checkIfStillNeedsLock()
+        if (!isActivityValid) {
+            Log.e(TAG, "Activity invalid in onResume, finishing")
+            finishWithCleanup()
+            return
+        }
+        
+        // 檢查session是否仍然有效
+        val session = activeSessions[lockedAppPackageName]
+        if (session == null || session.activityInstance != instanceId) {
+            Log.e(TAG, "Session invalidated in onResume, finishing")
+            finishWithCleanup()
+            return
         }
     }
 
     override fun onPause() {
         super.onPause()
-        Log.d(TAG, "OverlayValidationActivity onPause")
+        Log.e(TAG, "onPause() - hasValidated: $hasValidatedSuccessfully")
         
-        // 如果還沒驗證成功就暫停了，可能是用戶切換了應用
-        if (!hasValidatedSuccessfully) {
-            // 這裡可以添加邏輯來決定是否需要重新顯示鎖屏
-            handleUnauthorizedPause()
+        if (!hasValidatedSuccessfully && isActivityValid) {
+            Log.e(TAG, "Activity paused without validation - user might be trying to bypass")
+            // 這裡可以添加處理邏輯，比如記錄嘗試次數
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        Log.e(TAG, "onStop()")
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "OverlayValidationActivity onDestroy")
+        val lifetime = System.currentTimeMillis() - startTime
+        Log.e(TAG, "=== onDestroy() - lifetime: ${lifetime}ms ===")
         
-        isActivityActive = false
+        // 清理定時器
+        autoFinishHandler.removeCallbacks(autoFinishRunnable)
         
-        // 清理對應的session
-        sessionKey?.let { key ->
-            activeSessions.remove(key)
+        // 清理session
+        lockedAppPackageName?.let { packageName ->
+            clearSession(packageName)
         }
         
-        // 如果沒有成功驗證就被銷毀，需要清理狀態
-        if (!hasValidatedSuccessfully) {
-            lockedAppPackageName?.let { packageName ->
-                clearSession(packageName)
-            }
-        }
+        decrementActivityCount()
+        
+        Log.e(TAG, "Activity destroyed")
     }
 
     override fun onBackPressed() {
-        // 防止用戶通過返回鍵繞過鎖定
-        Log.d(TAG, "Back pressed - ignoring")
-        // 不調用 super.onBackPressed()
+        Log.e(TAG, "Back pressed - preventing bypass")
+        // 不調用super.onBackPressed()來防止用戶繞過驗證
     }
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        Log.d(TAG, "User leave hint")
+        Log.e(TAG, "User leave hint")
         
-        // 用戶試圖離開應用，如果還沒驗證成功，需要重新顯示鎖屏
         if (!hasValidatedSuccessfully) {
-            handleUnauthorizedLeave()
+            Log.e(TAG, "User attempted to leave without validation")
+            // 用戶試圖離開應用而沒有完成驗證
+            // 這裡可以記錄安全事件或採取其他措施
         }
+    }
+
+    // 模擬驗證流程（你需要根據實際情況修改）
+    private fun simulateValidation() {
+        Log.e(TAG, "Starting validation simulation")
+        
+        // 模擬指紋驗證或圖案驗證
+        // 這裡你需要調用實際的驗證邏輯
+        
+        // 模擬3秒後自動成功（僅用於測試）
+        autoFinishHandler.postDelayed({
+            if (isActivityValid && !hasValidatedSuccessfully) {
+                Log.e(TAG, "Simulated validation success")
+                onValidationSuccessful()
+            }
+        }, 3000)
     }
 
     // 驗證成功時調用
     private fun onValidationSuccessful() {
-        Log.d(TAG, "Validation successful for: $lockedAppPackageName")
+        Log.e(TAG, "=== Validation successful ===")
         hasValidatedSuccessfully = true
+        
+        // 取消自動完成定時器
+        autoFinishHandler.removeCallbacks(autoFinishRunnable)
+        
+        finishWithCleanup()
+    }
+
+    // 驗證失敗時調用
+    private fun onValidationFailed() {
+        Log.e(TAG, "Validation failed")
+        // 重置驗證狀態，讓用戶重新嘗試
+        // 不要finish()，讓用戶重新驗證
+    }
+
+    private fun finishWithCleanup() {
+        Log.e(TAG, "Finishing with cleanup")
+        
+        isActivityValid = false
+        
+        // 清理定時器
+        autoFinishHandler.removeCallbacks(autoFinishRunnable)
         
         // 清理session
         lockedAppPackageName?.let { packageName ->
@@ -178,41 +309,27 @@ class OverlayValidationActivity : AppCompatActivity() {
         finish()
     }
 
-    // 驗證失敗時調用
-    private fun onValidationFailed() {
-        Log.d(TAG, "Validation failed for: $lockedAppPackageName")
-        // 可以在這裡添加錯誤提示邏輯
-        // 不要finish()，讓用戶重新嘗試
-    }
-
-    private fun checkIfStillNeedsLock() {
-        // 檢查當前前台應用是否還是需要鎖定的應用
-        // 如果不是，可以直接結束Activity
-        lockedAppPackageName?.let { packageName ->
-            // 這裡可以添加邏輯來檢查當前前台應用
-            // 如果當前前台應用不是需要鎖定的應用，就結束Activity
-        }
-    }
-
-    private fun handleUnauthorizedPause() {
-        Log.d(TAG, "Handling unauthorized pause")
-        // 用戶可能試圖切換應用，這裡可以添加相應的處理邏輯
-        // 例如：記錄嘗試次數、發送通知等
-    }
-
-    private fun handleUnauthorizedLeave() {
-        Log.d(TAG, "Handling unauthorized leave")
-        // 用戶試圖離開應用而沒有完成驗證
-        // 可以在這裡添加額外的安全措施
-    }
-
-    // 模擬指紋驗證成功的回調
-    private fun onFingerprintValidationSuccess() {
+    // 供外部調用的驗證成功方法
+    fun notifyFingerprintSuccess() {
+        Log.e(TAG, "Fingerprint validation successful")
         onValidationSuccessful()
     }
 
-    // 模擬圖案驗證成功的回調
-    private fun onPatternValidationSuccess() {
+    // 供外部調用的驗證失敗方法
+    fun notifyFingerprintFailure() {
+        Log.e(TAG, "Fingerprint validation failed")
+        onValidationFailed()
+    }
+
+    // 供外部調用的圖案驗證成功方法
+    fun notifyPatternSuccess() {
+        Log.e(TAG, "Pattern validation successful")
         onValidationSuccessful()
+    }
+
+    // 供外部調用的圖案驗證失敗方法
+    fun notifyPatternFailure() {
+        Log.e(TAG, "Pattern validation failed")
+        onValidationFailed()
     }
 }
